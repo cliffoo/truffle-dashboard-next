@@ -1,0 +1,15 @@
+# Dependencies
+node_modules
+
+# Production
+build
+
+# SvelteKit `outDir`
+.svelte-kit
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Apple
+.DS_Store

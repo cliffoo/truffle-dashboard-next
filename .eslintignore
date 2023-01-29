@@ -1,0 +1,9 @@
+node_modules
+
+build
+
+.svelte-kit
+
+.DS_Store
+
+pnpm-lock.yaml

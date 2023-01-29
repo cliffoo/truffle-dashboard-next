@@ -1,0 +1,14 @@
+# Dependencies
+node_modules
+
+# Production
+build
+
+# SvelteKit `outDir`
+.svelte-kit
+
+# Apple
+.DS_Store
+
+# Lock file
+pnpm-lock.yaml
