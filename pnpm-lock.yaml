@@ -38,6 +38,42 @@ importers:
       svelte-check: 3.0.3_svelte@3.55.1
       tslib: 2.5.0
 
+  packages/dashboard-message-bus:
+    specifiers:
+      '@types/uuid': ^9.0.0
+      '@types/ws': ^8.5.4
+      dashboard-message-bus-common: workspace:^
+      uuid: ^9.0.0
+      ws: ^8.12.0
+    dependencies:
+      dashboard-message-bus-common: link:../dashboard-message-bus-common
+      uuid: 9.0.0
+      ws: 8.12.0
+    devDependencies:
+      '@types/uuid': 9.0.0
+      '@types/ws': 8.5.4
+
+  packages/dashboard-message-bus-client:
+    specifiers:
+      '@types/uuid': ^9.0.0
+      dashboard-message-bus-common: workspace:^
+      isomorphic-ws: ^5.0.0
+      uuid: ^9.0.0
+      ws: ^8.12.0
+    dependencies:
+      dashboard-message-bus-common: link:../dashboard-message-bus-common
+      isomorphic-ws: 5.0.0_ws@8.12.0
+      uuid: 9.0.0
+      ws: 8.12.0
+    devDependencies:
+      '@types/uuid': 9.0.0
+
+  packages/dashboard-message-bus-common:
+    specifiers:
+      '@types/ws': ^8.5.4
+    devDependencies:
+      '@types/ws': 8.5.4
+
 packages:
 
   /@esbuild/android-arm/0.16.17:
@@ -394,6 +430,16 @@ packages:
 
   /@types/semver/7.3.13:
     resolution: {integrity: sha512-21cFJr9z3g5dW8B0CVI9g2O9beqaThGQ6ZFBqHfwhzLDKUxaqTIy3vnfah/UPkfOiF2pLq+tGz+W8RyCskuslw==}
+    dev: true
+
+  /@types/uuid/9.0.0:
+    resolution: {integrity: sha512-kr90f+ERiQtKWMz5rP32ltJ/BtULDI5RVO0uavn1HQUOwjx0R1h0rnDYNL0CepF1zL5bSY6FISAfd9tOdDhU5Q==}
+    dev: true
+
+  /@types/ws/8.5.4:
+    resolution: {integrity: sha512-zdQDHKUgcX/zBc4GrwsE/7dVdAD8JR4EuiAXiiUhhfyIJXXb2+PrGshFyeXWQPMmmZ2XxgaqclgpIC7eTXc1mg==}
+    dependencies:
+      '@types/node': 18.11.18
     dev: true
 
   /@typescript-eslint/eslint-plugin/5.49.0_wxm6hkjtuois6ojbvd4okzqyxe:
@@ -1117,6 +1163,14 @@ packages:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
     dev: true
 
+  /isomorphic-ws/5.0.0_ws@8.12.0:
+    resolution: {integrity: sha512-muId7Zzn9ywDsyXgTIafTry2sV3nySZeUDe6YedVd1Hvuuep5AsIlqK+XefWpYTyJG5e503F2xIuT2lcU6rCSw==}
+    peerDependencies:
+      ws: '*'
+    dependencies:
+      ws: 8.12.0
+    dev: false
+
   /js-sdsl/4.3.0:
     resolution: {integrity: sha512-mifzlm2+5nZ+lEcLJMoBK0/IH/bDg8XnJfd/Wq6IP+xoCjLZsTOnV2QpxlVbX9bMnkl5PdEjNtBJ9Cj1NjifhQ==}
     dev: true
@@ -1682,6 +1736,11 @@ packages:
       punycode: 2.3.0
     dev: true
 
+  /uuid/9.0.0:
+    resolution: {integrity: sha512-MXcSTerfPa4uqyzStbRoTgt5XIe3x5+42+q1sDuy3R5MDk66URdLMOZe5aPX/SQd+kuYAh0FdP/pO28IkQyTeg==}
+    hasBin: true
+    dev: false
+
   /vite/4.0.4:
     resolution: {integrity: sha512-xevPU7M8FU0i/80DMR+YhgrzR5KS2ORy1B4xcX/cXLsvnUWvfHuqMmVU6N0YiJ4JWGRJJsLCgjEzKjG9/GKoSw==}
     engines: {node: ^14.18.0 || >=16.0.0}
@@ -1740,6 +1799,19 @@ packages:
   /wrappy/1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
     dev: true
+
+  /ws/8.12.0:
+    resolution: {integrity: sha512-kU62emKIdKVeEIOIKVegvqpXMSTAMLJozpHZaJNDYqBjzlSYXQGviYwN1osDLJ9av68qHd4a2oSjd7yD4pacig==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+    dev: false
 
   /yallist/4.0.0:
     resolution: {integrity: sha512-3wdGidZyq5PB084XLES5TpOSRA3wjXAlIWMhum2kRcv/41Sn2emQ0dycQW4uZXLejwKvg6EsvbdlVL+FYEct7A==}

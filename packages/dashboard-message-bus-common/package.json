@@ -1,0 +1,12 @@
+{
+  "name": "dashboard-message-bus-common",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.4"
+  }
+}

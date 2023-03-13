@@ -1,0 +1,18 @@
+{
+  "name": "dashboard-message-bus",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "dashboard-message-bus-common": "workspace:^",
+    "uuid": "^9.0.0",
+    "ws": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/uuid": "^9.0.0",
+    "@types/ws": "^8.5.4"
+  }
+}
