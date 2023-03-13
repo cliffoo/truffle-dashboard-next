@@ -1,4 +1,4 @@
-import type { ClientId, MessageId } from "dashboard-message-bus-common/libbbb";
+import type { ClientId, MessageId } from "dashboard-message-bus-common";
 import { Response } from "./response";
 
 export class MessageLifecycle {

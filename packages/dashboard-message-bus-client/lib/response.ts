@@ -1,4 +1,4 @@
-import { ZoneId } from "dashboard-message-bus-common/libbbb";
+import { ZoneId } from "dashboard-message-bus-common";
 
 type Resolve = (data: [unknown, boolean]) => void;
 

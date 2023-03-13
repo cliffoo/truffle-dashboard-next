@@ -1,186 +1,423 @@
 import WebSocket from "ws";
+import { v4 } from "uuid";
 import type {
-  MessageId,
+  ZoneId,
   ClientId,
-  NamedSocket,
+  MessageId,
+  SocketDataAuthRequest,
+  SocketDataAuthResponse,
   SocketDataMessage,
   SocketDataResponse,
-  SocketDataResponseAcknowledgement,
-  SocketData
-} from "dashboard-message-bus-common/lib";
+  SocketDataResponseAcknowledgment,
+  SocketDataFromClient,
+  SocketDataFromBus
+} from "dashboard-message-bus-common";
 import { Message } from "./message";
-import { ClientEntry } from "./client-entry";
-import type { Subscriptions } from "./types";
+import type {
+  Subscriptions,
+  AuthenticatedMessageBusClientSocket,
+  UnauthenticatedMessageBusClientSocket,
+  MessageBusClientSocket
+} from "./types";
 
 export class MessageBus {
   #messages: Map<MessageId, Message>;
-  #clientEntries: Map<ClientId, ClientEntry>;
-  #wsServer: WebSocket.Server<NamedSocket>;
+  #publisherClientIdToSubscriberClientIds: Subscriptions;
+  #secrets: Map<ClientId, string>;
+  #wsServer: WebSocket.Server<MessageBusClientSocket>;
 
-  constructor(subscriptions: Subscriptions) {
+  constructor(publisherClientIdToSubscriberClientIds: Subscriptions) {
     this.#messages = new Map();
-    this.#clientEntries = new Map();
-    this.#wsServer = new WebSocket.Server();
-    this.#setupClientEntries(subscriptions);
-    this.#setupWsServer();
+    this.#publisherClientIdToSubscriberClientIds =
+      publisherClientIdToSubscriberClientIds;
+    this.#secrets = this.#createSecrets();
+    this.#wsServer = this.#createWsServer();
   }
 
-  /** Get mapping of client id to client secret. */
+  /** Mapping of client id to client secret */
   get secrets() {
-    return new Map(
-      Array.from(this.#clientEntries, ([clientId, { secret }]) => [
-        clientId,
-        secret
-      ])
-    );
+    return new Map(this.#secrets);
   }
 
-  /** Get all WebSocket connections. */
+  /** Set of all open socket connections */
   get #sockets() {
     return this.#wsServer.clients;
   }
 
-  /**
-   * Solve all publish-subscribe relationships and populate `this.#clientEntries`.
-   * @param subscriptions - Mapping of subscriber id to array of publisher ids.
-   */
-  #setupClientEntries(subscriptions: Subscriptions) {
-    for (const [subscriberId, publisherIds] of Object.entries(subscriptions)) {
-      publisherIds.forEach(publisherId => {
-        this.#setupClientEntry(subscriberId);
-        this.#setupClientEntry(publisherId).addSubscriberId(subscriberId);
-      });
-    }
+  #createSecrets() {
+    if (!this.#publisherClientIdToSubscriberClientIds)
+      throw new Error("Cannot create secrets without subscription info");
+
+    const secrets: Map<ClientId, string> = new Map();
+    this.#publisherClientIdToSubscriberClientIds.forEach(
+      (subscriberClientIds, publisherClientId) => {
+        [...subscriberClientIds, publisherClientId].forEach(
+          clientId => void !secrets.has(clientId) && secrets.set(clientId, v4())
+        );
+      }
+    );
+    return secrets;
   }
 
   /**
-   * Create (if not present) and return ClientEntry.
-   * @param clientId
-   * @returns ClientEntry.
+   * Create and return WebSocket server set up with necessary handlers.
+   *
+   * The `type` property of parsed incoming socket data is used to communicate
+   * the action to perform:
+   * - "auth-request": Request to authenticate socket.
+   *     On initial successful authentication, send all outstanding messages
+   *     and responses.
+   * - "message": Socket, as publisher, publish message to all subscribers.
+   * - "response": Socket, as subscriber, respond to message.
+   * - "response-acknowledgment": Socket, as publisher, acknowledge response
+   *   (to a previously published message) as received, and possibly accepted.
+   *
+   * All actions require socket to be authenticated, except for "auth-request".
    */
-  #setupClientEntry(clientId: ClientId) {
-    let clientEntry = this.#clientEntries.get(clientId);
-    if (!clientEntry) {
-      clientEntry = new ClientEntry(clientId);
-      this.#clientEntries.set(clientId, clientEntry);
-    }
-    return clientEntry;
-  }
+  #createWsServer() {
+    const wsServer = new WebSocket.Server<MessageBusClientSocket>({
+      clientTracking: true
+    });
 
-  /**
-   * Handle authenticated connections to the WebSocket server.
-   * On connect, send all outstanding messages and responses.
-   * Listen for incoming socket data. The `type` property of the parsed socket
-   * data communicates the action to perform:
-   * - "message": As publisher, publish message to all subscribers.
-   * - "response": As subscriber, send response to message.
-   * - "response-acknowledgment": As publisher, acknowledge response (to a
-   *    previously published message) as received.
-   */
-  #setupWsServer() {
-    this.#wsServer.on("connection", socket => {
-      this.#sendOutstandingMessagesAndResponses(socket);
+    wsServer.on("connection", socket => {
+      socket.authenticated = false;
 
       socket.on("message", (rawSocketData: string) => {
-        const socketData: SocketData = JSON.parse(rawSocketData);
-        if (socketData.clientId !== socket.clientId) return;
+        const socketData: SocketDataFromClient = JSON.parse(rawSocketData);
+
+        if (socketData.type === "auth-request")
+          this.#handleAuthRequest(socketData, socket);
+
+        if (
+          !socket.authenticated ||
+          socket.zoneId !== socketData.zoneId ||
+          socket.clientId !== socketData.clientId
+        )
+          return socket.close();
+
+        if (!socket.sentOutstandingMessagesAndResponsesTo)
+          this.#sendOutstandingMessagesAndResponses(socket);
 
         switch (socketData.type) {
           case "message":
-            return this.#handleMessage(socketData);
+            return this.#handleMessage(socketData, socket);
           case "response":
-            return this.#handleResponse(socketData);
-          case "response-acknowledgement":
-            return this.#handleResponseAcknowledgement(socketData);
+            return this.#handleResponse(socketData, socket);
+          case "response-acknowledgment":
+            return this.#handleResponseAcknowledgment(socketData, socket);
         }
       });
     });
+
+    return wsServer;
+  }
+
+  #send<T extends SocketDataFromBus>(
+    socketData: T,
+    socket: MessageBusClientSocket
+  ) {
+    if (socket.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify(socketData));
+  }
+
+  #sendAuthResponse(authenticated: boolean, socket: MessageBusClientSocket) {
+    return this.#send<SocketDataAuthResponse>(
+      { type: "auth-response", authenticated },
+      socket
+    );
+  }
+
+  #sendMessage(
+    publisherZoneId: ZoneId,
+    publisherClientId: ClientId,
+    messageId: MessageId,
+    data: any,
+    subscriberSocket: AuthenticatedMessageBusClientSocket
+  ) {
+    return this.#send<SocketDataMessage>(
+      {
+        type: "message",
+        zoneId: publisherZoneId,
+        clientId: publisherClientId,
+        messageId,
+        data
+      },
+      subscriberSocket
+    );
+  }
+
+  #sendResponse(
+    subscriberZoneId: ZoneId,
+    subscriberClientId: ClientId,
+    messageId: MessageId,
+    data: any,
+    publisherSocket: AuthenticatedMessageBusClientSocket
+  ) {
+    return this.#send<SocketDataResponse>(
+      {
+        type: "response",
+        zoneId: subscriberZoneId,
+        clientId: subscriberClientId,
+        messageId,
+        data
+      },
+      publisherSocket
+    );
+  }
+
+  #sendResponseAcknowledgment(
+    publisherZoneId: ZoneId,
+    publisherClientId: ClientId,
+    responseAccepted: boolean,
+    messageId: MessageId,
+    subscriberSocket: AuthenticatedMessageBusClientSocket
+  ) {
+    return this.#send<SocketDataResponseAcknowledgment>(
+      {
+        type: "response-acknowledgment",
+        zoneId: publisherZoneId,
+        clientId: publisherClientId,
+        subscriberZoneId: subscriberSocket.zoneId,
+        subscriberClientId: subscriberSocket.clientId,
+        responseAccepted,
+        messageId
+      },
+      subscriberSocket
+    );
   }
 
   /**
    * Send to socket:
-   * - (Socket as subscriber) messages that haven't been responded to.
-   * - (Socket as publisher) responses that haven't been acknowledged.
-   * This should be done when socket connection is first established, to make
-   * up for any missed messages and responses while disconnected.
-   * @param socket - Socket to send to.
+   * - (Socket as subscriber) messages that socket hasn't responded to.
+   * - (Socket as publisher) responses that socket hasn't acknowledged.
+   *
+   * This should be done when connection is established, to try to recover from
+   * any missed messages and responses due to dropped connection.
+   *
+   * Limitation: Missed response acknowledgments due to dropped subscriber
+   * connection are not recovered.
    */
-  #sendOutstandingMessagesAndResponses(socket: NamedSocket) {
-    // Send messages that haven't been responded to.
-    this.#clientEntries.forEach(clientEntry => {
-      if (clientEntry.hasSubscriberId(socket.clientId)) {
-        clientEntry.messageIds.forEach(messageId => {
-          const message = this.#messages.get(messageId)!;
-          if (!message.hasResponseFrom(socket.clientId)) {
-            message.sendMessageTo(socket);
+  #sendOutstandingMessagesAndResponses(
+    socket: AuthenticatedMessageBusClientSocket
+  ) {
+    if (socket.sentOutstandingMessagesAndResponsesTo)
+      throw new Error(
+        "Already sent outstanding messages and responses to socket"
+      );
+
+    // Send messages that socket hasn't responded to
+    this.#sockets.forEach(publisherSocket => {
+      if (
+        publisherSocket.authenticated &&
+        publisherSocket.subscriberClientIds.has(socket.clientId)
+      ) {
+        publisherSocket.messages.forEach(message => {
+          if (!message.firstResponses.has(socket.clientId)) {
+            this.#sendMessage(
+              publisherSocket.zoneId,
+              publisherSocket.clientId,
+              message.id,
+              message.data,
+              socket
+            );
           }
         });
       }
     });
 
-    // Send responses that haven't been acknowledged.
-    const clientEntry = this.#clientEntries.get(socket.clientId)!;
-    clientEntry.messageIds.forEach(messageId => {
-      const message = this.#messages.get(messageId)!;
-      message.responses.forEach((response, subscriberId) => {
-        if (response.exists && !response.acknowledged) {
-          message.sendResponseTo(socket, subscriberId);
-        }
-      });
+    // Send responses that socket hasn't acknowledged
+    socket.messages.forEach(message => {
+      message.firstResponses.forEach(
+        (firstResponse, subscriberClientId) =>
+          void !firstResponse.acknowledged &&
+          this.#sendResponse(
+            firstResponse.subscriberZoneId,
+            subscriberClientId,
+            message.id,
+            message.data,
+            socket
+          )
+      );
     });
+
+    socket.sentOutstandingMessagesAndResponsesTo = true;
   }
 
-  #handleMessage({
-    clientId: publisherId,
-    messageId,
-    data
-  }: SocketDataMessage) {
-    const publisherEntry = this.#clientEntries.get(publisherId)!;
-
-    const noSubscribers = publisherEntry.subscriberIds.size === 0;
-    const duplicateMessageIds = this.#messages.has(messageId);
-    if (noSubscribers || duplicateMessageIds) return;
-
-    const message = new Message(messageId, publisherEntry, data);
-    this.#messages.set(messageId, message);
-    publisherEntry.addMessageId(messageId);
-
-    for (const socket of this.#sockets) {
-      if (publisherEntry.hasSubscriberId(socket.clientId))
-        message.sendMessageTo(socket);
-    }
+  /**
+   * Mutate socket with initialized `AuthenticatedMessageBusClientSocket` type
+   * properties.
+   */
+  #initAuthenticatedClient(
+    zoneId: ZoneId,
+    clientId: ClientId,
+    unauthenticatedSocket: UnauthenticatedMessageBusClientSocket
+  ) {
+    const socket =
+      unauthenticatedSocket as unknown as AuthenticatedMessageBusClientSocket;
+    socket.authenticated = true;
+    socket.zoneId = zoneId;
+    socket.clientId = clientId;
+    socket.subscriberClientIds =
+      this.#publisherClientIdToSubscriberClientIds.get(clientId)!;
+    socket.messages = new Map();
+    this.#messages.forEach(
+      message =>
+        void message.isPublishedBySocket(socket) &&
+        socket.messages.set(message.id, message)
+    );
+    socket.sentOutstandingMessagesAndResponsesTo = false;
   }
 
-  #handleResponse({
-    clientId: subscriberId,
-    messageId,
-    data
-  }: SocketDataResponse) {
-    const message = this.#messages.get(messageId);
-    if (!message) return;
-
-    message.setResponseData(subscriberId, data);
-
+  #getSocketByIds(zoneId: ZoneId, clientId: ClientId) {
     for (const socket of this.#sockets) {
-      if (socket.clientId === message.publisherId) {
-        return message.sendResponseTo(socket, subscriberId);
+      if (
+        socket.authenticated &&
+        socket.zoneId === zoneId &&
+        socket.clientId === clientId
+      ) {
+        return socket;
       }
     }
   }
 
-  #handleResponseAcknowledgement({
-    clientId: publisherId,
-    subscriberId,
-    messageId
-  }: SocketDataResponseAcknowledgement) {
+  #getSubscriberSockets(publisherSocket: AuthenticatedMessageBusClientSocket) {
+    return [...this.#sockets].filter(
+      socket =>
+        socket.authenticated &&
+        publisherSocket.subscriberClientIds.has(socket.clientId) &&
+        (publisherSocket.zoneId === socket.zoneId ||
+          publisherSocket.zoneId === "*" ||
+          socket.zoneId === "*")
+    ) as AuthenticatedMessageBusClientSocket[];
+  }
+
+  #handleAuthRequest(
+    { zoneId, clientId, secret }: SocketDataAuthRequest,
+    socket: MessageBusClientSocket
+  ) {
+    if (socket.authenticated) return this.#sendAuthResponse(true, socket);
+    if (typeof secret === "string" && this.#secrets.get(clientId) === secret) {
+      this.#initAuthenticatedClient(zoneId, clientId, socket);
+      this.#sendAuthResponse(true, socket);
+    } else {
+      this.#sendAuthResponse(false, socket);
+    }
+  }
+
+  #handleMessage(
+    { messageId, data }: SocketDataMessage,
+    publisherSocket: AuthenticatedMessageBusClientSocket
+  ) {
+    const noSubscribers = publisherSocket.subscriberClientIds.size === 0;
+    const duplicateMessageIds = this.#messages.has(messageId);
+    if (noSubscribers || duplicateMessageIds) return;
+
+    const message = new Message(
+      messageId,
+      data,
+      publisherSocket.zoneId,
+      publisherSocket.clientId,
+      this.#publisherClientIdToSubscriberClientIds.get(
+        publisherSocket.clientId
+      )!.size
+    );
+    this.#messages.set(messageId, message);
+    publisherSocket.messages.set(messageId, message);
+
+    this.#getSubscriberSockets(publisherSocket).forEach(subscriberSocket =>
+      this.#sendMessage(
+        publisherSocket.zoneId,
+        publisherSocket.clientId,
+        messageId,
+        data,
+        subscriberSocket
+      )
+    );
+  }
+
+  #handleResponse(
+    { messageId, data }: SocketDataResponse,
+    subscriberSocket: AuthenticatedMessageBusClientSocket
+  ) {
+    const message = this.#messages.get(messageId);
+    if (!message)
+      return this.#sendResponseAcknowledgment(
+        "",
+        "",
+        false,
+        messageId,
+        subscriberSocket
+      );
+    const { publisherZoneId, publisherClientId } = message;
+
+    /**
+     * If response already exists, send response acknowledgment back directly.
+     * We do this instead of relaying new response to publisher, because:
+     * - We already know if new response will be accepted.
+     * - Publisher socket may be disconnected, and no acknowledgment will be
+     *   made, if and when it reconnects.
+     */
+    const firstResponse = message.firstResponses.get(subscriberSocket.clientId);
+    if (firstResponse)
+      return this.#sendResponseAcknowledgment(
+        publisherZoneId,
+        publisherClientId,
+        firstResponse.subscriberZoneId === subscriberSocket.zoneId,
+        messageId,
+        subscriberSocket
+      );
+
+    message.firstResponses.set(subscriberSocket.clientId, {
+      subscriberZoneId: subscriberSocket.zoneId,
+      acknowledged: false,
+      data
+    });
+
+    const publisherSocket = this.#getSocketByIds(
+      publisherZoneId,
+      publisherClientId
+    );
+    if (publisherSocket)
+      this.#sendResponse(
+        subscriberSocket.zoneId,
+        subscriberSocket.clientId,
+        messageId,
+        data,
+        publisherSocket
+      );
+  }
+
+  #handleResponseAcknowledgment(
+    {
+      messageId,
+      subscriberZoneId,
+      subscriberClientId,
+      responseAccepted
+    }: SocketDataResponseAcknowledgment,
+    publisherSocket: AuthenticatedMessageBusClientSocket
+  ) {
     const message = this.#messages.get(messageId);
     if (!message) return;
 
-    message.acknowledgeResponse(subscriberId);
+    const subscriberSocket = this.#getSocketByIds(
+      subscriberZoneId,
+      subscriberClientId
+    );
+    if (subscriberSocket)
+      this.#sendResponseAcknowledgment(
+        publisherSocket.zoneId,
+        publisherSocket.clientId,
+        responseAccepted,
+        messageId,
+        subscriberSocket
+      );
+
+    const response = message.firstResponses.get(subscriberClientId);
+    if (response?.subscriberZoneId === subscriberZoneId)
+      response.acknowledged = true;
 
     if (message.finished) {
-      const publisherEntry = this.#clientEntries.get(publisherId)!;
-      publisherEntry.removeMessageId(messageId);
+      publisherSocket.messages.delete(messageId);
       this.#messages.delete(messageId);
     }
   }

@@ -1,131 +1,216 @@
 import WebSocket from "isomorphic-ws";
 import { v4 } from "uuid";
 import type {
-  MessageId,
+  ZoneId,
   ClientId,
+  MessageId,
+  SocketDataAuthRequest,
+  SocketDataAuthResponse,
   SocketDataMessage,
   SocketDataResponse,
-  SocketDataResponseAcknowledgement
-} from "dashboard-message-bus-common/lib";
+  SocketDataResponseAcknowledgment,
+  SocketDataFromClient,
+  SocketDataFromBus,
+  WebSocketProtocol
+} from "dashboard-message-bus-common";
+import { Response } from "./response";
+import { MessageLifecycle } from "./message-lifecycle";
 import { sleep } from "./utils";
+import type { MessageHandler, ResponseAcknowledgmentHandler } from "./types";
 
-export class MessageBusClient<
-  MessageData = any,
-  PublisherId extends string = ClientId
-> {
-  #id: ClientId;
-  #wsServerUri: string;
-  #messageHandlers: Map<PublisherId, Function>;
-  #responseHandlers: Map<MessageId, Map<ClientId, Function>>;
+export class MessageBusClient {
+  #zoneId: ZoneId;
+  #clientId: ClientId;
+  #secret: string;
+  #serverHost: string;
+  #serverProtocol: WebSocketProtocol;
+  #messageHandlers: Map<ClientId, MessageHandler>;
+  #responsesForAllMessages: Map<MessageId, Map<ClientId, Response>>;
+  #responseAcknowledgmentHandlers: Map<ClientId, ResponseAcknowledgmentHandler>;
   #socket: WebSocket.WebSocket;
+  #socketAuthenticated: boolean;
 
   constructor(
-    id: ClientId,
-    wsServerUri: string,
-    messageHandlers: [PublisherId, Function][]
+    zoneId: ZoneId,
+    clientId: ClientId,
+    secret: string,
+    serverHost: string,
+    serverProtocol: WebSocketProtocol,
+    messageHandlers: Record<ClientId, MessageHandler>
   ) {
-    this.#id = id;
-    this.#wsServerUri = wsServerUri;
-    this.#messageHandlers = new Map(messageHandlers);
-    this.#responseHandlers = new Map();
+    this.#zoneId = zoneId;
+    this.#clientId = clientId;
+    this.#secret = secret;
+    this.#serverHost = serverHost;
+    this.#serverProtocol = serverProtocol;
+    this.#messageHandlers = new Map(Object.entries(messageHandlers));
+    this.#responsesForAllMessages = new Map();
+    this.#responseAcknowledgmentHandlers = new Map();
     this.#socket = this.#createSocket();
-    this.#setupSocket();
+    this.#socketAuthenticated = false;
+  }
+
+  get #ids() {
+    return {
+      zoneId: this.#zoneId,
+      clientId: this.#clientId
+    };
   }
 
   #createSocket() {
-    return new WebSocket.WebSocket(this.#wsServerUri);
-  }
-
-  #setupSocket() {
-    this.#socket.on("message", (rawSocketData: string) => {
-      const socketData: SocketDataMessage | SocketDataResponse =
-        JSON.parse(rawSocketData);
-
+    const url = this.#serverProtocol + "://" + this.#serverHost;
+    const socket = new WebSocket.WebSocket(url);
+    socket.on("open", () => {
+      socket.send(
+        JSON.stringify({
+          type: "auth-request",
+          ...this.#ids,
+          secret: this.#secret
+        } satisfies SocketDataAuthRequest)
+      );
+    });
+    socket.on("message", (rawSocketData: string) => {
+      const socketData: SocketDataFromBus = JSON.parse(rawSocketData);
       switch (socketData.type) {
+        case "auth-response":
+          return this.#handleAuthResponse(socketData);
         case "message":
           return this.#handleMessage(socketData);
         case "response":
           return this.#handleResponse(socketData);
+        case "response-acknowledgment":
+          return this.#handleResponseAcknowledgment(socketData);
       }
     });
+    socket.on("close", () => (this.#socketAuthenticated = false));
+    return socket;
   }
 
-  async ensureConnected(recursionDepth = 0): Promise<void> {
-    if (recursionDepth === 10) {
+  async ready(recursionDepth = 0): Promise<void> {
+    if (recursionDepth === 60) {
       this.#socket.terminate();
-      return this.ensureConnected();
+      return this.ready();
     }
-
     switch (this.#socket.readyState) {
       case WebSocket.OPEN:
-        return;
+        if (this.#socketAuthenticated) return;
       case WebSocket.CONNECTING:
       case WebSocket.CLOSING:
         await sleep(50);
-        return this.ensureConnected(recursionDepth + 1);
+        return this.ready(recursionDepth + 1);
       case WebSocket.CLOSED:
         this.#socket = this.#createSocket();
-        return this.ensureConnected();
+        this.#socketAuthenticated = false;
+        return this.ready();
     }
   }
 
+  async #send<T extends SocketDataFromClient>(socketData: T) {
+    await this.ready();
+    this.#socket.send(JSON.stringify(socketData));
+  }
+
+  #sendMessage(messageId: MessageId, data: any) {
+    return this.#send<SocketDataMessage>({
+      type: "message",
+      ...this.#ids,
+      messageId,
+      data
+    });
+  }
+
+  #sendResponse(messageId: MessageId, data: any) {
+    return this.#send<SocketDataResponse>({
+      type: "response",
+      ...this.#ids,
+      messageId,
+      data
+    });
+  }
+
+  #sendResponseAcknowledgment(
+    messageId: MessageId,
+    subscriberZoneId: ZoneId,
+    subscriberClientId: ClientId,
+    responseAccepted: boolean
+  ) {
+    return this.#send<SocketDataResponseAcknowledgment>({
+      type: "response-acknowledgment",
+      ...this.#ids,
+      subscriberZoneId,
+      subscriberClientId,
+      responseAccepted,
+      messageId
+    });
+  }
+
+  #handleAuthResponse({ authenticated }: SocketDataAuthResponse) {
+    this.#socketAuthenticated = authenticated;
+    if (!authenticated) throw new Error("Failed to authenticate");
+  }
+
   async #handleMessage({
-    clientId: publisherId,
+    clientId: publisherClientId,
     messageId,
     data
   }: SocketDataMessage) {
-    const handler = this.#messageHandlers.get(publisherId as PublisherId);
+    const handler = this.#messageHandlers.get(publisherClientId);
+    if (!handler)
+      throw new Error(`Unable to handle messages from ${publisherClientId}`);
 
-    const response = {
-      type: "response",
-      clientId: this.#id,
-      messageId,
-      data: await handler?.(data)
-    } satisfies SocketDataResponse;
-
-    await this.ensureConnected();
-    this.#socket.send(JSON.stringify(response));
+    const responseAcknowledgmentHandler = await handler(data, responseData =>
+      this.#sendResponse(messageId, responseData)
+    );
+    if (responseAcknowledgmentHandler) {
+      this.#responseAcknowledgmentHandlers.set(
+        messageId,
+        responseAcknowledgmentHandler
+      );
+    }
   }
 
   async #handleResponse({
-    clientId: subscriberId,
+    zoneId: subscriberZoneId,
+    clientId: subscriberClientId,
     messageId,
     data
   }: SocketDataResponse) {
-    const handler = this.#responseHandlers.get(messageId);
+    const acknowledgeResponse = (responseAccepted: boolean) =>
+      this.#sendResponseAcknowledgment(
+        messageId,
+        subscriberZoneId,
+        subscriberClientId,
+        responseAccepted
+      );
 
-    await handler?.get(subscriberId)?.(data);
-    handler?.delete(subscriberId);
+    const responses = this.#responsesForAllMessages.get(messageId);
+    if (!responses) return acknowledgeResponse(false);
 
-    const acknowledgement = {
-      type: "response-acknowledgement",
-      clientId: this.#id,
-      subscriberId,
-      messageId
-    } satisfies SocketDataResponseAcknowledgement;
+    const response =
+      responses.get(subscriberClientId) ||
+      responses
+        .set(subscriberClientId, new Response())
+        .get(subscriberClientId)!;
+    if (!response.didInit) response.init(subscriberZoneId, data);
+    await acknowledgeResponse(response.acceptedZoneId! === subscriberZoneId);
 
-    await this.ensureConnected();
-    this.#socket.send(JSON.stringify(acknowledgement));
-
-    if (handler?.size === 0) this.#responseHandlers.delete(messageId);
+    response.resolve();
   }
 
-  async publish(
-    data: MessageData,
-    responseHandlers: [ClientId, Function][] = []
-  ) {
+  async #handleResponseAcknowledgment({
+    responseAccepted,
+    messageId
+  }: SocketDataResponseAcknowledgment) {
+    const handler = this.#responseAcknowledgmentHandlers.get(messageId);
+    if (!handler) return;
+    this.#responseAcknowledgmentHandlers.delete(messageId);
+    await handler(responseAccepted);
+  }
+
+  async publish(data: any) {
     const messageId = v4();
-    if (responseHandlers.length > 0)
-      this.#responseHandlers.set(messageId, new Map(responseHandlers));
-
-    const message = {
-      type: "message",
-      clientId: this.#id,
-      messageId,
-      data
-    } satisfies SocketDataMessage;
-
-    await this.ensureConnected();
-    this.#socket.send(JSON.stringify(message));
+    this.#responsesForAllMessages.set(messageId, new Map());
+    await this.#sendMessage(messageId, data);
+    return new MessageLifecycle(messageId, this.#responsesForAllMessages);
   }
 }
